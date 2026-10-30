@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import os
 import asyncio
 import random
@@ -18,29 +18,43 @@ def run_server():
 
 bot = commands.Bot(command_prefix="!", self_bot=True)
 
+# ID Kênh và Server (Lấy từ file spam.py)
+CHANNEL_ID = 1381302690335952988
+GUILD_ID = 1194106864582004849
+
 def is_boss_time():
-    # Đồng bộ giờ chuẩn Việt Nam (UTC+7)
     now = datetime.utcnow() + timedelta(hours=7)
-    
-    # Khung giờ 1: 11:55 đến 12:20
-    if now.hour == 11 and now.minute >= 55:
-        return True
-    if now.hour == 12 and now.minute <= 20:
-        return True
-        
-    # Khung giờ 2: 19:10 đến 19:35
-    if now.hour == 19 and 10 <= now.minute <= 35:
-        return True
-        
+    if now.hour == 11 and now.minute >= 55: return True
+    if now.hour == 12 and now.minute <= 20: return True
+    if now.hour == 19 and 10 <= now.minute <= 35: return True
     return False
+
+# Vòng lặp spam emoji mỗi 60 giây
+@tasks.loop(seconds=60)
+async def spam_emoji_task():
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if not guild: return
+        
+        channel = bot.get_channel(CHANNEL_ID)
+        if not channel: return
+            
+        if guild.emojis:
+            emoji = random.choice(guild.emojis)
+            await channel.send(str(emoji))
+            print(f"Đã spam emoji: {emoji} lúc {datetime.utcnow() + timedelta(hours=7)}")
+    except Exception as e:
+        print(f"Lỗi spam: {e}")
 
 @bot.event
 async def on_ready():
     print(f"Đã log: {bot.user}")
+    # Khởi động vòng lặp spam khi bot online
+    if not spam_emoji_task.is_running():
+        spam_emoji_task.start()
 
 @bot.event
 async def on_message(message):
-    # Nếu không nằm trong giờ đánh boss, lập tức bỏ qua tin nhắn
     if not is_boss_time():
         return
 
@@ -52,7 +66,6 @@ async def on_message(message):
                 
                 if "Đánh Boss" in label or "⚔️" in emoji_name:
                     try:
-                        # Delay ngẫu nhiên để giả lập thao tác người thật
                         await asyncio.sleep(random.uniform(2.5, 6.0))
                         await component.click()
                         print(f"Đã đánh boss lúc {datetime.utcnow() + timedelta(hours=7)}")
