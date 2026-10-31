@@ -9,27 +9,21 @@ from pathlib import Path
 from flask import Flask
 from threading import Thread
 
-# === 1. CẤU HÌNH WEB SERVER (Cho UptimeRobot) ===
+# === 1. WEB SERVER ===
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot đang chạy 3 tác vụ ngầm!"
+def home(): return "Bot đang cày tốc độ bàn thờ!"
 def run_server(): app.run(host="0.0.0.0", port=8080)
 
-# === 2. KHỞI TẠO BOT ===
 bot = commands.Bot(command_prefix="!", self_bot=True)
 
-# === 3. CẤU HÌNH SPAM EMOJI ===
+# === 2. CẤU HÌNH MAX TỐC ĐỘ ===
 CHANNEL_ID = 1381302690335952988
 GUILD_ID = 1194106864582004849
 
-# === 4. CẤU HÌNH AUTO REACT ===
-DELAY = 1.0  
-MAX_MESSAGES_PER_CHANNEL = None
-SKIP_BOT_MESSAGES = True
-FULL_SCAN = False
-CONCURRENT_CHANNELS = 4  
-EMOJI_WHITELIST = []
-EMOJI_BLACKLIST = []
+CONCURRENT_CHANNELS = 4  # Ép lên 4 kênh quét cùng lúc
+FARM_EMOJI = "🔥" 
+
 CATEGORIES = [
     {
         "id": 1281146625435369472,
@@ -44,88 +38,68 @@ CATEGORIES = [
 
 BASE_DIR = Path(__file__).parent
 PROGRESS_FILE = BASE_DIR / "progress.json"
-progress = {}
 
-def load_json(path):
-    if not path.exists(): return {}
-    with open(path, "r", encoding="utf-8") as f: return json.load(f)
+def load_json():
+    if not PROGRESS_FILE.exists(): return {}
+    with open(PROGRESS_FILE, "r", encoding="utf-8") as f: return json.load(f)
 
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
+def save_json(data):
+    with open(PROGRESS_FILE, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
 
-# === 5. CÁC HÀM XỬ LÝ AUTO REACT ===
-async def add_reaction_with_retry(message, emoji):
-    while True:
-        try:
-            await message.add_reaction(emoji)
-            return True
-        except discord.HTTPException as e:
-            if e.status == 429:
-                retry_after = getattr(e, "retry_after", 2.0)
-                sleep_time = float(retry_after) + 0.5
-                print(f"[Rate Limit] Dừng {sleep_time:.2f}s...")
-                await asyncio.sleep(sleep_time)
-                continue
-            return False
-        except Exception:
-            return False
-
-async def process_channel(channel):
+# === 3. XỬ LÝ QUÉT BÀI CŨ ĐUA TOP ===
+async def process_channel(channel, progress_data):
     key = str(channel.id)
-    ch_progress = progress.get(key, {})
+    ch_progress = progress_data.get(key, {})
     last_id = ch_progress.get("last_reacted_id")
     reacted = ch_progress.get("total_reacted", 0)
 
-    kwargs = {"limit": None if FULL_SCAN else MAX_MESSAGES_PER_CHANNEL}
-    if not FULL_SCAN and last_id: kwargs["after"] = discord.Object(id=int(last_id))
+    kwargs = {"limit": 1000} # Đẩy limit lên 1000 để lướt bài nhanh hơn
+    if last_id: kwargs["after"] = discord.Object(id=int(last_id))
 
-    new_reacted = 0
     last_reacted_id = None
-
-    async for message in channel.history(**kwargs):
-        if SKIP_BOT_MESSAGES and message.author.bot: continue
-        if not message.reactions: continue
-
-        for reaction in message.reactions:
-            if reaction.me: continue
-            if await add_reaction_with_retry(message, reaction.emoji):
-                new_reacted += 1
-                reacted += 1
-                last_reacted_id = message.id
-                print(f"[{channel.name}] Đã react: {reacted} lần")
-            await asyncio.sleep(DELAY)
+    
+    async for message in channel.history(oldest_first=True, **kwargs):
+        if message.author.bot: continue
+        
+        try:
+            # Ép thời gian nghỉ xuống mức sát giới hạn (0.3 - 0.6s)
+            await asyncio.sleep(random.uniform(0.3, 0.6))
+            
+            emoji_to_react = message.reactions[0].emoji if message.reactions else FARM_EMOJI
+            await message.add_reaction(emoji_to_react)
+            
+            reacted += 1
+            last_reacted_id = message.id
+        except discord.HTTPException as e:
+            if e.status == 429:
+                # Bị phạt 429 thì nghỉ ĐÚNG số giây Discord yêu cầu, xong bật dậy chạy tiếp ngay
+                await asyncio.sleep(float(getattr(e, "retry_after", 1.0)))
+        except: pass
 
     if last_reacted_id:
-        progress[key] = {"name": channel.name, "last_reacted_id": str(last_reacted_id), "total_reacted": reacted}
-        save_json(PROGRESS_FILE, progress)
-    return new_reacted
-
-async def process_category(cat_cfg, sem):
-    category = bot.get_channel(cat_cfg["id"])
-    if not category: return 0
-    excluded = set(cat_cfg.get("excluded_channels", []))
-    channels = [ch for ch in category.channels if isinstance(ch, discord.TextChannel) and ch.id not in excluded]
-
-    async def work(ch):
-        async with sem:
-            try: return await process_channel(ch)
-            except: return 0
-
-    results = await asyncio.gather(*[work(ch) for ch in channels], return_exceptions=True)
-    return sum(r for r in results if isinstance(r, int))
+        progress_data[key] = {"last_reacted_id": str(last_reacted_id), "total_reacted": reacted}
+        save_json(progress_data)
 
 async def do_react_task():
-    global progress
     await bot.wait_until_ready()
     while True:
-        progress = load_json(PROGRESS_FILE)
-        if CATEGORIES:
-            sem = asyncio.Semaphore(CONCURRENT_CHANNELS)
-            for cat in CATEGORIES: await process_category(cat, sem)
-            save_json(PROGRESS_FILE, progress)
-        await asyncio.sleep(60)
+        progress_data = load_json()
+        sem = asyncio.Semaphore(CONCURRENT_CHANNELS)
+        
+        for cat_cfg in CATEGORIES:
+            cat = bot.get_channel(cat_cfg["id"])
+            if not cat: continue
+            excluded = set(cat_cfg.get("excluded_channels", []))
+            
+            async def work(ch):
+                async with sem: await process_channel(ch, progress_data)
+                
+            tasks_list = [work(ch) for ch in cat.channels if isinstance(ch, discord.TextChannel) and ch.id not in excluded]
+            await asyncio.gather(*tasks_list, return_exceptions=True)
+            
+        await asyncio.sleep(5) # Xong 1 vòng thì lặp lại gần như ngay lập tức
 
-# === 6. VÒNG LẶP SPAM EMOJI ===
+# === 4. CÁC TÁC VỤ AUTO SPAM & BOSS ===
 @tasks.loop(seconds=60)
 async def spam_emoji_task():
     try:
@@ -135,7 +109,6 @@ async def spam_emoji_task():
             await channel.send(str(random.choice(guild.emojis)))
     except: pass
 
-# === 7. SỰ KIỆN AUTO BOSS & ON_READY ===
 def is_boss_time():
     now = datetime.utcnow() + timedelta(hours=7)
     if (now.hour == 11 and now.minute >= 55) or (now.hour == 12 and now.minute <= 20): return True
@@ -144,12 +117,9 @@ def is_boss_time():
 
 @bot.event
 async def on_ready():
-    # Ép trạng thái kết nối ngầm thành Tàng hình để không bị chặn thông báo điện thoại
     await bot.change_presence(status=discord.Status.invisible)
     print(f"Đã log: {bot.user}")
-    
-    if not spam_emoji_task.is_running(): 
-        spam_emoji_task.start()
+    if not spam_emoji_task.is_running(): spam_emoji_task.start()
     asyncio.create_task(do_react_task())
 
 @bot.event
@@ -167,6 +137,5 @@ async def on_message(message):
                     except: pass
     await bot.process_commands(message)
 
-# === 8. CHẠY HỆ THỐNG ===
 Thread(target=run_server).start()
 bot.run(os.environ.get("DISCORD_TOKEN"))
