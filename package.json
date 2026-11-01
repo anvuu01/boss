@@ -7,7 +7,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "postinstall": "node -e \"const fs = require('fs'), path = require('path'); try { const p = path.join('node_modules/discord.js-selfbot-v13/src/rest/RequestHandler.js'); let c = fs.readFileSync(p, 'utf-8'); c = c.replace('Number(retryAfter) * 1_000', '(Number(retryAfter) > 5000 ? Number(retryAfter) : Number(retryAfter) * 1_000)'); fs.writeFileSync(p, c); } catch {}\""
   },
   "dependencies": {
     "discord.js-selfbot-v13": "^3.5.3"

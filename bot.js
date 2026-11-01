@@ -17,6 +17,23 @@ const fsp = require("fs/promises");
 const fs = require("fs");
 const path = require("path");
 
+
+// Tự động vá lỗi nhân 1000x Sublimit của discord.js v13 khi gặp Slowmode
+(function patchDiscordJsSublimit() {
+  try {
+    const rhPath = path.join(__dirname, "node_modules/discord.js-selfbot-v13/src/rest/RequestHandler.js");
+    if (fs.existsSync(rhPath)) {
+      let content = fs.readFileSync(rhPath, "utf-8");
+      const badLine = "retryAfter = retryAfter ? Number(retryAfter) * 1_000 : -1;";
+      const fixedLine = "retryAfter = retryAfter ? (Number(retryAfter) > 5000 ? Number(retryAfter) : Number(retryAfter) * 1_000) : -1;";
+      if (content.includes(badLine)) {
+        content = content.replace(badLine, fixedLine);
+        fs.writeFileSync(rhPath, content, "utf-8");
+      }
+    }
+  } catch (e) {}
+})();
+
 // Tự động nạp file .env nếu có
 (function loadEnvFile() {
   const envPath = path.join(__dirname, ".env");
@@ -486,9 +503,11 @@ async function doReactLoop() {
 
     const channels = refreshChannelList();
     if (channels.length === 0) {
+      addLog("REACT", "Đang đợi cache danh mục kênh (chưa thấy kênh nào phù hợp)...");
       await sleep(8000);
       continue;
     }
+    addLog("REACT", `Bắt đầu quét ${channels.length} kênh trong danh mục (Chế độ: ${currentMode.toUpperCase()})`);
 
     const jobs = channels.map(async (ch) => {
       await sem.acquire();
