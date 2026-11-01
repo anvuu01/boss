@@ -16,6 +16,29 @@ const fsp = require("fs/promises");
 const fs = require("fs");
 const path = require("path");
 
+// Tự động nạp file .env nếu có
+(function loadEnvFile() {
+  const envPath = path.join(__dirname, ".env");
+  if (!fs.existsSync(envPath)) return;
+  try {
+    const content = fs.readFileSync(envPath, "utf-8");
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx <= 0) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (!process.env[key]) {
+        process.env[key] = val;
+      }
+    }
+  } catch {}
+})();
+
 // ═══════════════════════════════════════════════════════
 // 1. CẤU HÌNH & TRẠNG THÁI TOÀN CỤC
 // ═══════════════════════════════════════════════════════
@@ -429,7 +452,8 @@ function refreshChannelList() {
   for (const cat of CATEGORIES) {
     const category = client.channels.cache.get(cat.id);
     if (!category || !category.children) continue;
-    for (const [, ch] of category.children.cache) {
+    const children = category.children.cache || category.children;
+    for (const [, ch] of children) {
       if (ch.type === 0 && !cat.excluded.has(ch.id)) list.push(ch);
     }
   }
