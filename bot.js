@@ -485,7 +485,8 @@ function refreshChannelList() {
     if (!category || !category.children) continue;
     const children = category.children.cache || category.children;
     for (const [, ch] of children) {
-      if (ch.type === 0 && !cat.excluded.has(ch.id)) list.push(ch);
+      const isText = (ch.isText && ch.isText()) || ch.type === "GUILD_TEXT" || ch.type === 0;
+      if (isText && !cat.excluded.has(ch.id)) list.push(ch);
     }
   }
   return list;
@@ -547,17 +548,30 @@ async function runSpamEmojiLoop() {
           emojiCacheAge = Date.now();
         }
 
+        const slowmodeSec = channel.rateLimitPerUser || 60;
+
+        // Kiểm tra xem tin nhắn gần nhất của mình đã hết thời gian Slowmode chưa
+        try {
+          const msgs = await channel.messages.fetch({ limit: 10 });
+          const myLast = msgs.find(m => m.author.id === client.user.id);
+          if (myLast) {
+            const elapsed = (Date.now() - myLast.createdTimestamp) / 1000;
+            if (elapsed < slowmodeSec) {
+              const waitSec = slowmodeSec - elapsed + 2.0;
+              addLog("SPAM", `Đang trong thời gian chờ Slowmode (${elapsed.toFixed(0)}s/${slowmodeSec}s). Tạm nghỉ ${waitSec.toFixed(1)}s...`);
+              await sleep(waitSec * 1000);
+            }
+          }
+        } catch (_) {}
+
         if (emojiCache.length > 0) {
           const pick = emojiCache[(Math.random() * emojiCache.length) | 0];
           await channel.send(`${pick}`);
           addLog("SPAM", `Đã gửi emoji: ${pick} (kênh #${channel.name || CHANNEL_ID})`);
         }
 
-        // Tự động nhận diện Slowmode của kênh (mặc định 60s nếu chưa load)
-        const slowmodeSec = channel.rateLimitPerUser || 60;
-        // Khoảng thời gian tối ưu: Thời gian Slowmode + 1.2s bù trừ độ trễ mạng
-        // Giúp 100% không bao giờ bị Discord chặn vì gửi sớm vài mili-giây
-        const optimalDelayMs = (slowmodeSec * 1000) + 1200;
+        // Chờ đúng thời gian Slowmode + 2s an toàn
+        const optimalDelayMs = (slowmodeSec * 1000) + 2000;
         await sleep(optimalDelayMs);
         continue;
       }
