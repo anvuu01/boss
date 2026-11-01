@@ -9,6 +9,7 @@
 "use strict";
 
 const { Client } = require("discord.js-selfbot-v13");
+const WebSocketShard = require("discord.js-selfbot-v13/src/client/websocket/WebSocketShard");
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
@@ -172,11 +173,18 @@ function createDiscordClient() {
     },
   });
 
-  // BỎ QUA HTTP GET /gateway:
-  // Render và các Cloud Host chia sẻ IP thường bị Discord áp dụng 429 Sublimit ~16 giờ cho HTTP /gateway.
-  // URL WebSocket Gateway của Discord luôn cố định là wss://gateway.discord.gg.
-  // Gán tĩnh Promise này giúp bot bỏ qua request HTTP gây 429 và kết nối thẳng WebSocket!
-  c.api.gateway.get = () => Promise.resolve({ url: "wss://gateway.discord.gg" });
+  // BỎ QUA HOÀN TOÀN HTTP GET /gateway:
+  // Render và các Cloud Host chia sẻ IP bị Discord áp dụng 429 Sublimit 16 giờ cho HTTP /gateway.
+  // Ghi đè trực tiếp ws.connect để kết nối thẳng wss://gateway.discord.gg qua WebSocket mà KHÔNG gọi HTTP /gateway!
+  c.ws.connect = async function () {
+    const gatewayURL = "wss://gateway.discord.gg";
+    this.gateway = gatewayURL + "/";
+    this.totalShards = 1;
+    this.client.options.shardCount = 1;
+    this.client.options.shards = [0];
+    this.shardQueue = new Set([new WebSocketShard(this, 0)]);
+    return this.createShards();
+  };
 
   c.once("ready", () => {
     botIsReady = true;
