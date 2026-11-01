@@ -6,10 +6,11 @@ Bot tự động quét reaction Discord, spam emoji chu kỳ và săn Boss tự 
 
 ## 🚀 Tính Năng Chính
 
-- **Web UI Quản Lý Trực Quan**: 
+- **Web UI Quản Lý Trực Quan & Bảo Mật**: 
+  - Đã tích hợp **Màn hình đăng nhập Mật khẩu**: Bảo vệ bảng điều khiển khỏi người lạ truy cập.
   - Xem trạng thái Bot, Tag Discord, Uptime theo thời gian thực.
   - Chuyển đổi linh hoạt giữa 3 chế độ (**Safe**, **Normal**, **Fast**) ngay trên trình duyệt mà không cần restart.
-  - Công tắc bật/tắt nhanh từng tính năng: Auto React, Auto Spam Emoji, Auto Đánh Boss.
+  - Công tắc bật/tắt nhanh từng tính năng: Auto React, Auto Spam Emoji (tối ưu chống slowmode 60s), Auto Đánh Boss.
   - Bảng thống kê chi tiết số lượt đã react từng kênh, ID bài viết cuối cùng, số lần gặp 429 rate limit.
   - Bộ xem nhật ký (Console Logs) trực tiếp trên Web.
 - **Tối Ưu 100% Cho Render**:

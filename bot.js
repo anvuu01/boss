@@ -11,6 +11,7 @@
 const { Client } = require("discord.js-selfbot-v13");
 const http = require("http");
 const https = require("https");
+const crypto = require("crypto");
 const fsp = require("fs/promises");
 const fs = require("fs");
 const path = require("path");
@@ -23,6 +24,34 @@ const CHANNEL_ID = "1381302690335952988";
 const GUILD_ID = "1194106864582004849";
 const FARM_EMOJI = "🔥";
 const FETCH_LIMIT = 100;
+
+// Mật khẩu bảo vệ Web UI
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "jdshfsjk(*(*SJHslkdj)827";
+const AUTH_SECRET = "mbot-secure-salt-827-auth";
+const activeSessions = new Set();
+
+function generateAuthToken() {
+  return crypto.createHmac("sha256", AUTH_SECRET).update(ADMIN_PASSWORD.trim()).digest("hex");
+}
+
+function verifyAuth(req) {
+  // 1. Kiểm tra Cookie
+  const cookieHeader = req.headers.cookie || "";
+  const match = cookieHeader.match(/mbot_session=([a-zA-Z0-9_-]+)/);
+  const correctToken = generateAuthToken();
+  if (match && (match[1] === correctToken || activeSessions.has(match[1]))) {
+    return true;
+  }
+
+  // 2. Kiểm tra Header Authorization hoặc x-admin-token
+  const authHeader = req.headers.authorization || req.headers["x-admin-token"] || "";
+  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+  if (token && (token === correctToken || activeSessions.has(token))) {
+    return true;
+  }
+
+  return false;
+}
 
 // Chế độ mặc định là "normal" theo yêu cầu
 let currentMode = process.env.BOT_MODE || "normal";
@@ -96,11 +125,91 @@ function addLog(type, message) {
 }
 
 // ═══════════════════════════════════════════════════════
-// 2. DISCORD CLIENT KHỞI TẠO
+// 2. DISCORD CLIENT KHỞI TẠO (GIẢ LẬP WINDOWS DESKTOP CLIENT)
 // ═══════════════════════════════════════════════════════
-const client = new Client({ checkUpdate: false });
+function createDiscordClient() {
+  const c = new Client({
+    checkUpdate: false,
+    autoRedeemNitro: false,
+    http: {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9188 Chrome/130.0.6723.191 Electron/33.4.0 Safari/537.36',
+      },
+    },
+    ws: {
+      properties: {
+        os: 'Windows',
+        browser: 'Discord Client',
+        release_channel: 'stable',
+        client_version: '1.0.9188',
+        os_version: '10.0.19045',
+        os_arch: 'x64',
+        system_locale: 'en-US',
+      },
+    },
+  });
+
+  c.once("ready", () => {
+    botIsReady = true;
+    if (loginTimeoutTimer) {
+      clearTimeout(loginTimeoutTimer);
+      loginTimeoutTimer = null;
+    }
+    c.user.setStatus("invisible");
+    addLog("READY", `Đăng nhập thành công: ${c.user.tag} (ID: ${c.user.id})`);
+    addLog("READY", `Chế độ: ${currentMode.toUpperCase()} | Đang bắt đầu chu trình quét`);
+
+    startSpamEmoji();
+    startCacheSweeper();
+    doReactLoop();
+  });
+
+  c.on("error", (err) => {
+    addLog("ERROR", `Discord Error: ${err.message}`);
+  });
+
+  c.on("shardError", (err) => {
+    addLog("ERROR", `Discord Shard Error: ${err.message}`);
+  });
+
+  c.on("shardDisconnect", (event) => {
+    addLog("AUTH", `Mất kết nối Gateway (Code: ${event.code}, Lý do: ${event.reason || "Không rõ"})`);
+  });
+
+  c.on("warn", (warn) => {
+    addLog("WARN", `Cảnh báo Discord: ${warn}`);
+  });
+
+  // Bắt các thông điệp Debug quan trọng từ WebSocket Gateway để hiển thị lên Web UI
+  c.on("debug", (info) => {
+    const text = String(info || "");
+    if (
+      text.includes("429") ||
+      text.includes("Rate limit") ||
+      text.includes("Session") ||
+      text.includes("Heartbeat") ||
+      text.includes("Connecting") ||
+      text.includes("Identify") ||
+      text.includes("Close") ||
+      text.includes("401") ||
+      text.includes("Invalid") ||
+      text.includes("captcha") ||
+      text.includes("gateway")
+    ) {
+      addLog("DEBUG", text);
+    }
+  });
+
+  // Sự kiện nhận tin nhắn săn Boss
+  c.on("messageCreate", handleBossMessage);
+
+  return c;
+}
+
+let client = createDiscordClient();
 let botIsReady = false;
-let discordToken = process.env.DISCORD_TOKEN || "";
+let discordToken = "";
+let loginTimeoutTimer = null;
 
 // ═══════════════════════════════════════════════════════
 // 3. TIỆN ÍCH & TÍNH TOÁN BOSS TIME
@@ -360,38 +469,66 @@ async function doReactLoop() {
 }
 
 // ═══════════════════════════════════════════════════════
-// 7. AUTO SPAM EMOJI THEO CHU KỲ
+// 7. AUTO SPAM EMOJI THEO CHU KỲ (TỐI ƯU CHỐNG SLOWMODE 1 PHÚT)
 // ═══════════════════════════════════════════════════════
 let emojiCache = [];
 let emojiCacheAge = 0;
 
-function startSpamEmoji() {
-  setInterval(async () => {
-    if (!controls.spamEmoji || !botIsReady) return;
+async function runSpamEmojiLoop() {
+  while (true) {
+    if (!controls.spamEmoji || !botIsReady) {
+      await sleep(3000);
+      continue;
+    }
+
     try {
       const guild = client.guilds.cache.get(GUILD_ID);
       const channel = client.channels.cache.get(CHANNEL_ID);
-      if (!guild || !channel) return;
+      if (guild && channel) {
+        if (Date.now() - emojiCacheAge > 300_000 || emojiCache.length === 0) {
+          emojiCache = [...guild.emojis.cache.values()];
+          emojiCacheAge = Date.now();
+        }
 
-      if (Date.now() - emojiCacheAge > 300_000 || emojiCache.length === 0) {
-        emojiCache = [...guild.emojis.cache.values()];
-        emojiCacheAge = Date.now();
+        if (emojiCache.length > 0) {
+          const pick = emojiCache[(Math.random() * emojiCache.length) | 0];
+          await channel.send(`${pick}`);
+          addLog("SPAM", `Đã gửi emoji: ${pick} (kênh #${channel.name || CHANNEL_ID})`);
+        }
+
+        // Tự động nhận diện Slowmode của kênh (mặc định 60s nếu chưa load)
+        const slowmodeSec = channel.rateLimitPerUser || 60;
+        // Khoảng thời gian tối ưu: Thời gian Slowmode + 1.2s bù trừ độ trễ mạng
+        // Giúp 100% không bao giờ bị Discord chặn vì gửi sớm vài mili-giây
+        const optimalDelayMs = (slowmodeSec * 1000) + 1200;
+        await sleep(optimalDelayMs);
+        continue;
       }
-      if (emojiCache.length === 0) return;
-
-      const pick = emojiCache[(Math.random() * emojiCache.length) | 0];
-      await channel.send(`${pick}`);
-      addLog("SPAM", `Đã gửi emoji: ${pick}`);
     } catch (e) {
-      addLog("ERROR", `Spam emoji thất bại: ${e.message}`);
+      const status = e.status || e.httpStatus;
+      if (status === 429) {
+        const retryAfter = (e.retryAfter || e.retry_after || 5) * 1000 + 1000;
+        addLog("SPAM", `Dính Slowmode Discord: Tự động chờ ${(retryAfter / 1000).toFixed(1)}s rồi gửi tiếp...`);
+        await sleep(retryAfter);
+        continue;
+      } else {
+        addLog("ERROR", `Spam emoji thất bại: ${e.message}`);
+      }
     }
-  }, 60_000);
+
+    // Thời gian dự phòng: 61.2s
+    await sleep(61_200);
+  }
+}
+
+function startSpamEmoji() {
+  runSpamEmojiLoop();
 }
 
 // ═══════════════════════════════════════════════════════
 // 8. AUTO ĐÁNH BOSS (COMPONENTS / BUTTON CLICK)
 // ═══════════════════════════════════════════════════════
-client.on("messageCreate", async (message) => {
+async function handleBossMessage(message) {
   if (!controls.autoBoss) return;
   const boss = getBossStatus();
   if (!boss.isNow) return;
@@ -417,7 +554,7 @@ client.on("messageCreate", async (message) => {
       }
     }
   }
-});
+}
 
 // ═══════════════════════════════════════════════════════
 // 9. DỌN DẸP BỘ NHỚ ĐỊNH KỲ
@@ -461,30 +598,73 @@ function startRenderKeepAlive() {
 }
 
 // ═══════════════════════════════════════════════════════
-// 11. KHỞI CHẠY BOT AN TOÀN
+// 11. KHỞI CHẠY BOT AN TOÀN VÀ LÀM SẠCH TOKEN
 // ═══════════════════════════════════════════════════════
-client.once("ready", () => {
-  botIsReady = true;
-  client.user.setStatus("invisible");
-  addLog("READY", `Đăng nhập thành công: ${client.user.tag} (ID: ${client.user.id})`);
-  addLog("READY", `Chế độ: ${currentMode.toUpperCase()} | Giới hạn 429 backoff bảo vệ`);
+function detectEnvironmentToken() {
+  const envCandidates = [
+    "DISCORD_TOKEN",
+    "TOKEN",
+    "BOT_TOKEN",
+    "USER_TOKEN",
+    "DISCORD_USER_TOKEN",
+    "AUTH_TOKEN"
+  ];
+  for (const name of envCandidates) {
+    if (process.env[name] && process.env[name].trim()) {
+      return { key: name, raw: process.env[name] };
+    }
+  }
+  return { key: null, raw: "" };
+}
 
-  startSpamEmoji();
-  startCacheSweeper();
-  doReactLoop();
-});
+function sanitizeToken(token) {
+  if (!token) return "";
+  let clean = String(token).trim();
+  // Loại bỏ dấu nháy kép hoặc đơn ("..." hoặc '...')
+  clean = clean.replace(/^["']|["']$/g, "").trim();
+  // Loại bỏ tiền tố "Bot " nếu người dùng lỡ copy
+  if (clean.toLowerCase().startsWith("bot ")) {
+    clean = clean.slice(4).trim();
+  }
+  return clean;
+}
 
-function tryLogin(token) {
+async function tryLogin(tokenInput, sourceName = "Môi trường") {
+  const token = sanitizeToken(tokenInput);
   if (!token) {
-    addLog("AUTH", "⚠️ Chưa có DISCORD_TOKEN. Bot đang chờ cấu hình Token qua Web UI hoặc Render Environment.");
+    addLog("AUTH", "⚠️ Chưa tìm thấy Token. Hãy cấu hình DISCORD_TOKEN trên Render hoặc nhập qua Web UI.");
     return false;
   }
+
   discordToken = token;
-  addLog("AUTH", "Đang kết nối tới Discord...");
-  client.login(token).catch((err) => {
+  const masked = token.length > 8 ? `${token.slice(0, 4)}...${token.slice(-4)}` : "***";
+  addLog("AUTH", `Kiểm tra Token (${sourceName}): Độ dài ${token.length} ký tự, dạng [${masked}]`);
+
+  if (token.length < 50) {
+    addLog("WARN", `⚠️ Token có độ dài ${token.length} ký tự. Lưu ý Token User Discord thông thường dài khoảng 59-75 ký tự.`);
+  }
+
+  try {
+    if (botIsReady) {
+      client.destroy();
+      client = createDiscordClient();
+      botIsReady = false;
+    }
+
+    if (loginTimeoutTimer) clearTimeout(loginTimeoutTimer);
+    loginTimeoutTimer = setTimeout(() => {
+      if (!botIsReady) {
+        addLog("WARN", "⚠️ Đã quá 15s chưa nhận phản hồi Gateway. Nếu vẫn bị treo, hãy kiểm tra: (1) Token có bị đổi chưa, (2) Đăng nhập web discord.com xem tài khoản có bị đòi Captcha/SĐT không.");
+      }
+    }, 15000);
+
+    addLog("AUTH", "Đang gửi yêu cầu đăng nhập Gateway...");
+    await client.login(token);
+    return true;
+  } catch (err) {
     addLog("ERROR", `Không thể đăng nhập Discord: ${err.message}`);
-  });
-  return true;
+    return false;
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -676,6 +856,9 @@ function renderHtml() {
     .tag-RENDER{ background: #134e4a; color: #2dd4bf; }
     .tag-ERROR { background: #7f1d1d; color: #f87171; }
     .tag-AUTH  { background: #3b0764; color: #e879f9; }
+    .tag-DEBUG { background: #1e293b; color: #94a3b8; }
+    .tag-WARN  { background: #78350f; color: #fde047; }
+    .tag-MODE  { background: #1e1b4b; color: #a5b4fc; }
 
     /* Button */
     .btn {
@@ -685,16 +868,70 @@ function renderHtml() {
     }
     .btn:hover { background: var(--primary-hover); }
     .btn-sm { padding: 6px 12px; font-size: 12px; }
-    input[type="text"] {
+    input[type="text"], input[type="password"] {
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--card-border);
       color: #fff; padding: 8px 12px; border-radius: 8px; font-size: 13px; outline: none;
     }
-    input[type="text"]:focus { border-color: var(--primary); }
+    input[type="text"]:focus, input[type="password"]:focus { border-color: var(--primary); }
+
+    /* Login Modal Overlay */
+    .login-wrapper {
+      position: fixed; inset: 0; background: rgba(9, 13, 22, 0.94);
+      backdrop-filter: blur(20px); z-index: 9999;
+      display: flex; align-items: center; justify-content: center; padding: 20px;
+    }
+    .login-card {
+      background: rgba(18, 24, 38, 0.92); border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 20px; padding: 36px 30px; max-width: 420px; width: 100%;
+      text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+      display: flex; flex-direction: column; gap: 14px;
+    }
+    .login-icon {
+      width: 58px; height: 58px; border-radius: 16px;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 26px; margin: 0 auto 4px; box-shadow: 0 8px 24px var(--primary-glow);
+    }
+    .login-card h2 { font-size: 22px; font-weight: 700; color: #fff; }
+    .login-card p { font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+    .login-error {
+      background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #f87171; padding: 10px; border-radius: 8px; font-size: 13px; font-weight: 600;
+    }
+    .input-group { position: relative; width: 100%; }
+    .input-group input {
+      width: 100%; padding: 12px 42px 12px 14px; background: rgba(255,255,255,0.06);
+      border: 1px solid var(--card-border); border-radius: 10px; color: #fff; font-size: 14px;
+    }
+    .btn-toggle-pass {
+      position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+      background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 16px;
+    }
+    .btn-login { width: 100%; padding: 12px; font-size: 14px; margin-top: 4px; }
+    .login-hint { font-size: 11px; color: #64748b; margin-top: 4px; }
   </style>
 </head>
 <body>
-  <div class="container">
+  <!-- Màn hình Đăng nhập Mật khẩu Bảo Mật -->
+  <div id="loginOverlay" class="login-wrapper">
+    <div class="login-card">
+      <div class="login-icon">🔒</div>
+      <h2>M-Bot Security</h2>
+      <p>Bảng điều khiển được bảo mật. Vui lòng nhập mật khẩu quản trị để tiếp tục.</p>
+      <div id="loginError" class="login-error" style="display: none;"></div>
+      <form id="loginForm" onsubmit="handleLogin(event)" style="display: flex; flex-direction: column; gap: 12px; margin-top: 6px;">
+        <div class="input-group">
+          <input type="password" id="adminPasswordInput" placeholder="Nhập mật khẩu quản trị..." autocomplete="current-password" required>
+          <button type="button" class="btn-toggle-pass" onclick="togglePasswordVisibility()" title="Ẩn/Hiện">👁️</button>
+        </div>
+        <button type="submit" class="btn btn-login" id="loginBtn">Mở Khóa Bảng Điều Khiển</button>
+      </form>
+      <div class="login-hint">Render Node.js • Multi-channel Selfbot</div>
+    </div>
+  </div>
+
+  <div class="container" id="mainDashboard" style="display: none;">
     
     <!-- Header -->
     <div class="header">
@@ -705,11 +942,12 @@ function renderHtml() {
           <p id="subinfo">Render Deployment • Node.js Optimized</p>
         </div>
       </div>
-      <div style="display: flex; align-items: center; gap: 12px;">
+      <div style="display: flex; align-items: center; gap: 10px;">
         <span id="botStatusBadge" class="badge waiting">
           <span class="dot"></span> <span id="botStatusText">Đang khởi động...</span>
         </span>
         <span id="uptimeBadge" class="badge" style="background: rgba(255,255,255,0.05); color: #cbd5e1;">Uptime: 0m</span>
+        <button class="btn btn-sm" style="background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3);" onclick="handleLogout()" title="Đăng xuất">🔒 Thoát</button>
       </div>
     </div>
 
@@ -952,10 +1190,84 @@ function renderHtml() {
       return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
+    let authToken = localStorage.getItem('mbot_auth') || '';
+    let pollInterval = null;
+
+    function getAuthHeaders() {
+      const h = { 'Content-Type': 'application/json' };
+      if (authToken) h['Authorization'] = 'Bearer ' + authToken;
+      return h;
+    }
+
+    function togglePasswordVisibility() {
+      const inp = document.getElementById('adminPasswordInput');
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    }
+
+    async function handleLogin(e) {
+      if (e) e.preventDefault();
+      const pass = document.getElementById('adminPasswordInput').value;
+      const errBox = document.getElementById('loginError');
+      errBox.style.display = 'none';
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pass })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          authToken = data.token;
+          localStorage.setItem('mbot_auth', data.token);
+          showDashboard();
+        } else {
+          errBox.style.display = 'block';
+          errBox.textContent = data.error || 'Mật khẩu không chính xác!';
+        }
+      } catch (err) {
+        errBox.style.display = 'block';
+        errBox.textContent = 'Lỗi kết nối tới máy chủ!';
+      }
+    }
+
+    async function handleLogout() {
+      localStorage.removeItem('mbot_auth');
+      authToken = '';
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+      await fetch('/api/logout', { method: 'POST', headers: getAuthHeaders() }).catch(() => {});
+      document.getElementById('mainDashboard').style.display = 'none';
+      document.getElementById('loginOverlay').style.display = 'flex';
+      document.getElementById('adminPasswordInput').value = '';
+    }
+
+    function showDashboard() {
+      document.getElementById('loginOverlay').style.display = 'none';
+      document.getElementById('mainDashboard').style.display = 'flex';
+      fetchStatus();
+      if (!pollInterval) pollInterval = setInterval(fetchStatus, 3000);
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status', {
+          headers: getAuthHeaders()
+        });
+        if (res.status === 401) {
+          handleLogout();
+          return;
+        }
+        const data = await res.json();
+        updateUI(data);
+      } catch (e) {
+        console.error("Lỗi fetch status", e);
+      }
+    }
+
     async function setMode(mode) {
       await fetch('/api/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ mode })
       });
       fetchStatus();
@@ -964,7 +1276,7 @@ function renderHtml() {
     async function toggleSetting(key, val) {
       await fetch('/api/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ [key]: val })
       });
       fetchStatus();
@@ -973,18 +1285,30 @@ function renderHtml() {
     async function saveToken() {
       const token = document.getElementById('tokenInput').value.trim();
       if (!token) return alert('Vui lòng nhập Token');
-      await fetch('/api/token', {
+      const res = await fetch('/api/token', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ token })
       });
+      if (res.status === 401) return handleLogout();
       alert('Đã gửi token! Đang kết nối Discord...');
       fetchStatus();
     }
 
-    // Polling tự động mỗi 3 giây
-    fetchStatus();
-    setInterval(fetchStatus, 3000);
+    // Kiểm tra phiên đăng nhập đã lưu
+    if (authToken) {
+      fetch('/api/status', { headers: getAuthHeaders() }).then(res => {
+        if (res.ok) {
+          showDashboard();
+        } else {
+          document.getElementById('loginOverlay').style.display = 'flex';
+        }
+      }).catch(() => {
+        document.getElementById('loginOverlay').style.display = 'flex';
+      });
+    } else {
+      document.getElementById('loginOverlay').style.display = 'flex';
+    }
   </script>
 </body>
 </html>`;
@@ -1015,18 +1339,53 @@ function parseJsonBody(req) {
 }
 
 // ═══════════════════════════════════════════════════════
-// 13. KHỞI TẠO HTTP SERVER VỚI API
+// 13. KHỞI TẠO HTTP SERVER VỚI API & BẢO MẬT MẬT KHẨU
 // ═══════════════════════════════════════════════════════
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
 
-  // 1. Health check cho Render và Uptime Monitors
+  // 1. Health check cho Render và Uptime Monitors (Luôn Public)
   if (url === "/health" || url === "/ping") {
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ status: "healthy", botReady: botIsReady, mode: currentMode }));
   }
 
-  // 2. API Status (Dữ liệu thời gian thực cho Web UI)
+  // 2. API Đăng nhập Mật Khẩu Quản Trị (Public)
+  if (url === "/api/login" && req.method === "POST") {
+    const payload = await parseJsonBody(req);
+    const inputPass = String(payload.password || "");
+    // So sánh mật khẩu (chấp nhận cả bản gốc và bản đã gọt khoảng trắng)
+    if (inputPass === ADMIN_PASSWORD || inputPass.trim() === ADMIN_PASSWORD.trim()) {
+      const token = generateAuthToken();
+      activeSessions.add(token);
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Set-Cookie": `mbot_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
+      });
+      return res.end(JSON.stringify({ success: true, token }));
+    }
+    res.writeHead(401, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ success: false, error: "Mật khẩu không chính xác!" }));
+  }
+
+  // 3. API Đăng xuất (Public)
+  if (url === "/api/logout" && req.method === "POST") {
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Set-Cookie": "mbot_session=; Path=/; HttpOnly; Max-Age=0",
+    });
+    return res.end(JSON.stringify({ success: true }));
+  }
+
+  // 4. BẢO VỆ TẤT CẢ CÁC API CÒN LẠI (Yêu cầu mật khẩu)
+  if (url.startsWith("/api/")) {
+    if (!verifyAuth(req)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: "Unauthorized", needLogin: true }));
+    }
+  }
+
+  // 5. API Status (Dữ liệu thời gian thực cho Web UI)
   if (url === "/api/status" && req.method === "GET") {
     const totalAllTime = Object.values(progress).reduce((acc, cur) => acc + (cur.total_reacted || 0), 0);
     const profile = PROFILES[currentMode] || PROFILES.normal;
@@ -1053,7 +1412,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify(data));
   }
 
-  // 3. API Thay đổi cài đặt & Chế độ
+  // 6. API Thay đổi cài đặt & Chế độ
   if (url === "/api/settings" && req.method === "POST") {
     const payload = await parseJsonBody(req);
     if (payload.mode && PROFILES[payload.mode]) {
@@ -1068,11 +1427,11 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ success: true, mode: currentMode, controls }));
   }
 
-  // 4. API Cài Token từ UI
+  // 7. API Cài Token từ UI
   if (url === "/api/token" && req.method === "POST") {
     const payload = await parseJsonBody(req);
     if (payload.token) {
-      tryLogin(payload.token);
+      tryLogin(payload.token, "Giao diện Web UI");
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ success: true }));
     }
@@ -1080,7 +1439,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ error: "Token rỗng" }));
   }
 
-  // 5. Trang chủ Web UI
+  // 8. Trang chủ Web UI (Chứa màn hình Login + Dashboard)
   if (url === "/" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     return res.end(renderHtml());
@@ -1098,11 +1457,13 @@ server.listen(PORT, "0.0.0.0", () => {
   // Kích hoạt Render Keep-alive
   startRenderKeepAlive();
 
-  // Đăng nhập Discord nếu đã có token
-  if (discordToken) {
-    tryLogin(discordToken);
+  // Tự động tìm và đăng nhập Token từ các biến môi trường phổ biến
+  const envResult = detectEnvironmentToken();
+  if (envResult.key) {
+    addLog("AUTH", `Đã phát hiện biến môi trường: "${envResult.key}"`);
+    tryLogin(envResult.raw, `Biến ${envResult.key}`);
   } else {
-    addLog("AUTH", "Chưa tìm thấy DISCORD_TOKEN trong biến môi trường. Hãy nhập trên Web UI hoặc cài đặt trong Render Dashboard.");
+    addLog("AUTH", "Chưa tìm thấy biến Token (DISCORD_TOKEN, TOKEN...) trong môi trường. Hãy nhập trên Web UI hoặc cài đặt trong Render Dashboard.");
   }
 });
 
