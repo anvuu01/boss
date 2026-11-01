@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: m-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: BOT_MODE
+        value: normal
+      - key: DISCORD_TOKEN
+        sync: false
