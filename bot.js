@@ -172,6 +172,12 @@ function createDiscordClient() {
     },
   });
 
+  // BỎ QUA HTTP GET /gateway:
+  // Render và các Cloud Host chia sẻ IP thường bị Discord áp dụng 429 Sublimit ~16 giờ cho HTTP /gateway.
+  // URL WebSocket Gateway của Discord luôn cố định là wss://gateway.discord.gg.
+  // Gán tĩnh Promise này giúp bot bỏ qua request HTTP gây 429 và kết nối thẳng WebSocket!
+  c.api.gateway.get = () => Promise.resolve({ url: "wss://gateway.discord.gg" });
+
   c.once("ready", () => {
     botIsReady = true;
     if (loginTimeoutTimer) {
