@@ -21,7 +21,7 @@ Bot tự động quét reaction Discord, spam emoji chu kỳ và săn Boss tự 
 
 ---
 
-## ⚙️ Các Chế Độ Tốc Độ
+# ⚙️ Các Chế Độ Tốc Độ
 
 | Chế độ | Kênh song song | Delay mỗi react | Cooldown phụ | Đánh giá |
 |:---:|:---:|:---:|:---:|:---|
